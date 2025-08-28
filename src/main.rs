@@ -8,7 +8,6 @@ use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use serde::Deserialize;
-use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]
 pub struct PersonId {
@@ -30,20 +29,44 @@ mod client;
 
 static LED_CONTROL: Mutex<CriticalSectionRawMutex, Option<WS2812RMT>> = Mutex::new(None);
 
-async fn spin_leds(color: RGB8) {
+async fn spin_leds(colors: &[RGB8]) {
     let mut led_control = LED_CONTROL.lock().await;
     if let Some(led) = led_control.as_mut() {
+        let color_count = colors.len().min(12);
+        
         for _ in 0..3 {
-            for position in 0..12 {
-                let mut colors = [RGB8::new(0, 0, 0); 12];
-
-                colors[position] = color;
-
-                led.set_pixels(&colors).unwrap();
+            for offset in 0..12 {
+                let mut led_colors = [RGB8::new(0, 0, 0); 12];
+                
+                for (i, &color) in colors.iter().take(color_count).enumerate() {
+                    let position = (i + offset) % 12;
+                    led_colors[position] = color;
+                }
+                
+                led.set_pixels(&led_colors).unwrap();
                 Timer::after(Duration::from_millis(30)).await;
             }
         }
     }
+}
+
+fn user_colors(input: u16) -> [u8, u8, u8] {
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    let hash = hasher.finish();
+    
+    let sat_range = ((max_sat - min_sat) * 1000.0) as u64; // Scale for integer math
+    let mut colors = [HsvColor { hue: 0.0, saturation: 0.0 }; 3];
+    
+    for i in 0..3 {
+        let hue_hash = hash.wrapping_mul(2654435761).wrapping_add((i * 2) as u64);
+        let sat_hash = hash.wrapping_mul(1103515245).wrapping_add((i * 2 + 1) as u64);
+        
+        colors[i].hue = (hue_hash % 360) as f32;
+        colors[i].saturation = min_sat + ((sat_hash % sat_range) as f32 / 1000.0);
+    }
+    
+    colors
 }
 
 #[embassy_executor::task]
@@ -57,8 +80,13 @@ async fn button_task(button: PinDriver<'static, Gpio3, Input>) {
         // rising edge
         if current_state && !last_state {
             log::info!("button pressed");
-            let color = hsv_to_rgb(270, 255, 100);
-            spin_leds(color).await;
+            let color1 = hsv_to_rgb(196, 175, 20); //tran
+            let color2 = hsv_to_rgb(0, 0, 20); //sgen
+            let color3 = hsv_to_rgb(348, 175, 20); //der
+            spin_leds(&[
+                color1, color2, color3,
+                color1, color2, color3,
+            ]).await;
         }
         last_state = current_state;
     }
@@ -98,24 +126,28 @@ async fn ambient_color_task() {
 
 #[embassy_executor::task]
 async fn checkin_task() {
-    let mut last_checkins: HashSet<u32> = HashSet::<u32>::new();
+    let mut client = client::init().unwrap();
+
+    let mut last_checkins = client::get(&mut client).unwrap();
     loop {
-        Timer::after(Duration::from_millis(1000)).await;
-        let curr_checkins = client::get().unwrap();
+        let curr_checkins = client::get(&mut client).unwrap();
 
         let new_checkins: Vec<_> = curr_checkins.difference(&last_checkins).collect();
         if !new_checkins.is_empty() {
-            // this is broken rn, when a lot or smth it doesnt do any colors
             for id in new_checkins {
                 log::info!("new checkin: {:?}", id);
-                let color = hsv_to_rgb(255, 0, 0);
-                spin_leds(color).await;
+                let color = hsv_to_rgb(242, 24, 60);
+                spin_leds(&[color]).await;
             }
         }
 
         last_checkins = curr_checkins;
+        Timer::after(Duration::from_millis(1000)).await;
     }
 }
+
+// compile time env var - wifi psk
+static PSK: &'static str = env!("PSK");
 
 #[main]
 async fn main(spawner: Spawner) {
@@ -137,7 +169,7 @@ async fn main(spawner: Spawner) {
     let sysloop = EspSystemEventLoop::take().unwrap();
     let _wifi = wifi(
         "Recurse Center",
-        WIFIPSK,
+        PSK,
         peripherals.modem,
         sysloop,
     )
