@@ -33,16 +33,16 @@ async fn spin_leds(colors: &[RGB8]) {
     let mut led_control = LED_CONTROL.lock().await;
     if let Some(led) = led_control.as_mut() {
         let color_count = colors.len().min(12);
-        
+
         for _ in 0..3 {
             for offset in 0..12 {
                 let mut led_colors = [RGB8::new(0, 0, 0); 12];
-                
+
                 for (i, &color) in colors.iter().take(color_count).enumerate() {
                     let position = (i + offset) % 12;
                     led_colors[position] = color;
                 }
-                
+
                 led.set_pixels(&led_colors).unwrap();
                 Timer::after(Duration::from_millis(30)).await;
             }
@@ -50,20 +50,22 @@ async fn spin_leds(colors: &[RGB8]) {
     }
 }
 
-fn user_colors(input: u16) -> [u8, u8, u8] {
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    let hash = hasher.finish();
+fn user_colors(input: u32) -> Vec<RGB8> {
+    let offsets = [0, 3333, 6666];
+   
+    let mut colors = Vec::new();
     
-    let sat_range = ((max_sat - min_sat) * 1000.0) as u64; // Scale for integer math
-    let mut colors = [HsvColor { hue: 0.0, saturation: 0.0 }; 3];
-    
-    for i in 0..3 {
-        let hue_hash = hash.wrapping_mul(2654435761).wrapping_add((i * 2) as u64);
-        let sat_hash = hash.wrapping_mul(1103515245).wrapping_add((i * 2 + 1) as u64);
+    for (_i, &offset) in offsets.iter().enumerate() {
+        let offset_input = (input + offset) % 9999;
         
-        colors[i].hue = (hue_hash % 360) as f32;
-        colors[i].saturation = min_sat + ((sat_hash % sat_range) as f32 / 1000.0);
+        // 0-359
+        let h = (offset_input * 359 / 9999) as u16;
+        // 150-255
+        let s = (150 + (offset_input * (255 - 150) / 9999)) as u8;
+        // 15-55
+        let v = (15 + (offset_input * (55 - 15) / 9999)) as u8;
+        
+        colors.push(hsv_to_rgb(h, s, v));
     }
     
     colors
@@ -83,10 +85,7 @@ async fn button_task(button: PinDriver<'static, Gpio3, Input>) {
             let color1 = hsv_to_rgb(196, 175, 20); //tran
             let color2 = hsv_to_rgb(0, 0, 20); //sgen
             let color3 = hsv_to_rgb(348, 175, 20); //der
-            spin_leds(&[
-                color1, color2, color3,
-                color1, color2, color3,
-            ]).await;
+            spin_leds(&[color1, color2, color3, color1, color2, color3]).await;
         }
         last_state = current_state;
     }
@@ -136,8 +135,8 @@ async fn checkin_task() {
         if !new_checkins.is_empty() {
             for id in new_checkins {
                 log::info!("new checkin: {:?}", id);
-                let color = hsv_to_rgb(242, 24, 60);
-                spin_leds(&[color]).await;
+                let user_rgb = user_colors(*id);
+                spin_leds(&user_rgb).await;
             }
         }
 
@@ -167,13 +166,7 @@ async fn main(spawner: Spawner) {
     }
 
     let sysloop = EspSystemEventLoop::take().unwrap();
-    let _wifi = wifi(
-        "Recurse Center",
-        PSK,
-        peripherals.modem,
-        sysloop,
-    )
-    .unwrap();
+    let _wifi = wifi("Recurse Center", PSK, peripherals.modem, sysloop).unwrap();
 
     spawner.spawn(ambient_color_task()).unwrap();
     spawner.spawn(button_task(button)).unwrap();
